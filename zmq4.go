@@ -11,6 +11,7 @@ package zmq4
 #include <stdlib.h>
 #include <string.h>
 #include "zmq4.h"
+#include "zmq42draft.h"
 
 int
     zmq4_major = ZMQ_VERSION_MAJOR,
@@ -86,6 +87,7 @@ var (
 	ErrorNotImplemented405     = errors.New("Not implemented, requires 0MQ version 4.0.5")
 	ErrorNotImplemented41      = errors.New("Not implemented, requires 0MQ version 4.1")
 	ErrorNotImplemented42      = errors.New("Not implemented, requires 0MQ version 4.2")
+	ErrorNotImplemented42draft = errors.New("Not implemented, requires 0MQ version 4.2 with drafts enabled")
 	ErrorNotImplementedWindows = errors.New("Not implemented on Windows")
 	ErrorNoSocket              = errors.New("No such socket")
 )
@@ -467,6 +469,14 @@ const (
 	PULL   = Type(C.ZMQ_PULL)
 	PAIR   = Type(C.ZMQ_PAIR)
 	STREAM = Type(C.ZMQ_STREAM)
+	// DRAFT
+	SERVER  = Type(C.ZMQ_SERVER)
+	CLIENT  = Type(C.ZMQ_CLIENT)
+	RADIO   = Type(C.ZMQ_RADIO)
+	DISH    = Type(C.ZMQ_DISH)
+	GATHER  = Type(C.ZMQ_GATHER)
+	SCATTER = Type(C.ZMQ_SCATTER)
+	DGRAM   = Type(C.ZMQ_DGRAM)
 )
 
 /*
@@ -498,6 +508,21 @@ func (t Type) String() string {
 		return "PAIR"
 	case STREAM:
 		return "STREAM"
+	// DRAFT
+	case SERVER:
+		return "SERVER"
+	case CLIENT:
+		return "CLIENT"
+	case RADIO:
+		return "RADIO"
+	case DISH:
+		return "DISH"
+	case GATHER:
+		return "GATHER"
+	case SCATTER:
+		return "SCATTER"
+	case DGRAM:
+		return "DGRAM"
 	}
 	return "<INVALID>"
 }
@@ -706,6 +731,9 @@ func (ctx *Context) NewSocket(t Type) (soc *Socket, err error) {
 	if !ctx.opened {
 		return soc, ErrorContextClosed
 	}
+	if t < 0 {
+		return soc, ErrorNotImplemented42draft
+	}
 	s, e := C.zmq_socket(ctx.ctx, C.int(t))
 	if s == nil {
 		err = errget(e)
@@ -814,7 +842,7 @@ Receive a message part from a socket.
 For a description of flags, see: http://api.zeromq.org/4-1:zmq-msg-recv#toc2
 */
 func (soc *Socket) Recv(flags Flag) (string, error) {
-	b, err := soc.RecvBytes(flags)
+	b, _, err := soc.RecvBytesWithOpts(flags)
 	return string(b), err
 }
 
@@ -824,25 +852,77 @@ Receive a message part from a socket.
 For a description of flags, see: http://api.zeromq.org/4-1:zmq-msg-recv#toc2
 */
 func (soc *Socket) RecvBytes(flags Flag) ([]byte, error) {
+	b, _, err := soc.RecvBytesWithOpts(flags)
+	return b, err
+}
+
+/*
+Receive a message part from a socket, including message options.
+
+For a description of flags, see: http://api.zeromq.org/4-1:zmq-msg-recv#toc2
+
+Valid options are
+
+ - OptRoutingId(0)
+ - OptGroup("")
+
+*/
+func (soc *Socket) RecvWithOpts(flags Flag, options ...interface{}) (string, []interface{}, error) {
+	b, o, err := soc.RecvBytesWithOpts(flags, options...)
+	return string(b), o, err
+}
+
+/*
+Receive a message part from a socket, including message options.
+
+For a description of flags, see: http://api.zeromq.org/4-1:zmq-msg-recv#toc2
+
+Valid options are
+
+ - OptRoutingId(0)
+ - OptGroup("")
+
+*/
+func (soc *Socket) RecvBytesWithOpts(flags Flag, options ...interface{}) ([]byte, []interface{}, error) {
+	opts := make([]interface{}, len(options))
+
 	if !soc.opened {
-		return []byte{}, ErrorSocketClosed
+		return []byte{}, opts, ErrorSocketClosed
 	}
 	var msg C.zmq_msg_t
 	if i, err := C.zmq_msg_init(&msg); i != 0 {
-		return []byte{}, errget(err)
+		return []byte{}, opts, errget(err)
 	}
 	defer C.zmq_msg_close(&msg)
 
 	size, err := C.zmq_msg_recv(&msg, soc.soc, C.int(flags))
 	if size < 0 {
-		return []byte{}, errget(err)
+		return []byte{}, opts, errget(err)
 	}
 	if size == 0 {
-		return []byte{}, nil
+		return []byte{}, opts, nil
 	}
 	data := make([]byte, int(size))
 	C.zmq4_memcpy(unsafe.Pointer(&data[0]), C.zmq_msg_data(&msg), C.size_t(size))
-	return data, nil
+
+	for i, option := range options {
+		switch option.(type) {
+		case OptRoutingId:
+			if !has42draft {
+				return []byte{}, opts, ErrorNotImplemented42draft
+			}
+			opts[i] = OptRoutingId(uint32(C.zmq_msg_routing_id(&msg)))
+		case OptGroup:
+			if !has42draft {
+				return []byte{}, opts, ErrorNotImplemented42draft
+			}
+			opts[i] = OptGroup(C.GoString(C.zmq_msg_group(&msg)))
+		default:
+			return []byte{}, opts, ErrorNotImplemented42
+		}
+	}
+
+	return data, opts, nil
 }
 
 /*
@@ -850,8 +930,8 @@ Send a message part on a socket.
 
 For a description of flags, see: http://api.zeromq.org/4-1:zmq-send#toc2
 */
-func (soc *Socket) Send(data string, flags Flag) (int, error) {
-	return soc.SendBytes([]byte(data), flags)
+func (soc *Socket) Send(data string, flags Flag, options ...interface{}) (int, error) {
+	return soc.SendBytes([]byte(data), flags, options...)
 }
 
 /*
@@ -859,15 +939,55 @@ Send a message part on a socket.
 
 For a description of flags, see: http://api.zeromq.org/4-1:zmq-send#toc2
 */
-func (soc *Socket) SendBytes(data []byte, flags Flag) (int, error) {
+func (soc *Socket) SendBytes(data []byte, flags Flag, options ...interface{}) (int, error) {
 	if !soc.opened {
 		return 0, ErrorSocketClosed
 	}
-	d := data
-	if len(data) == 0 {
-		d = []byte{0}
+	if len(options) == 0 {
+		d := data
+		if len(data) == 0 {
+			d = []byte{0}
+		}
+		size, err := C.zmq_send(soc.soc, unsafe.Pointer(&d[0]), C.size_t(len(data)), C.int(flags))
+		if size < 0 {
+			return int(size), errget(err)
+		}
+		return int(size), nil
 	}
-	size, err := C.zmq_send(soc.soc, unsafe.Pointer(&d[0]), C.size_t(len(data)), C.int(flags))
+	if !has42draft {
+		return 0, ErrorNotImplemented42draft
+	}
+
+	var msg C.zmq_msg_t
+	rc, err := C.zmq_msg_init_size(&msg, C.size_t(len(data)))
+	if rc != 0 {
+		return int(rc), errget(err)
+	}
+	defer C.zmq_msg_close(&msg)
+
+	C.zmq4_memcpy(C.zmq_msg_data(&msg), unsafe.Pointer(&data[0]), C.size_t(len(data)))
+
+	for _, option := range options {
+		switch t := option.(type) {
+		case OptRoutingId:
+			id := C.uint32_t(uint32(t))
+			rc, err := C.zmq_msg_set_routing_id(&msg, id)
+			if rc != 0 {
+				return int(rc), errget(err)
+			}
+		case OptGroup:
+			s := C.CString(string(t))
+			rc, err := C.zmq_msg_set_group(&msg, s)
+			C.free(unsafe.Pointer(s))
+			if rc != 0 {
+				return int(rc), errget(err)
+			}
+		default:
+			return 0, fmt.Errorf("Invalid message option: %#v", option)
+		}
+	}
+
+	size, err := C.zmq_msg_send(&msg, soc.soc, C.int(flags))
 	if size < 0 {
 		return int(size), errget(err)
 	}
