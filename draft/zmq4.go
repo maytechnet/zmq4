@@ -2,7 +2,7 @@ package zmq4
 
 /*
 #cgo !windows pkg-config: libzmq
-#cgo windows CFLAGS: -I/usr/local/include
+#cgo windows CFLAGS: -I/usr/local/include -DZMQ_BUILD_DRAFT_API=1
 #cgo windows LDFLAGS: -L/usr/local/lib -lzmq
 #include <zmq.h>
 #if ZMQ_VERSION_MINOR < 2
@@ -93,6 +93,32 @@ var (
 
 	initVersionError error
 	initContextError error
+
+	// api compatibility, based on changes in header files
+	api = map[[2]int]int{
+		[2]int{0, 0}: 1,
+		[2]int{0, 1}: 2,
+		[2]int{0, 2}: 3,
+		[2]int{0, 3}: 3,
+		[2]int{0, 4}: 3,
+		[2]int{0, 5}: 4,
+		[2]int{0, 6}: 4,
+		[2]int{0, 7}: 4,
+		[2]int{0, 8}: 4,
+		[2]int{1, 0}: 5,
+		[2]int{1, 1}: 6,
+		[2]int{1, 2}: 6,
+		[2]int{1, 3}: 6,
+		[2]int{1, 4}: 6,
+		[2]int{1, 5}: 6,
+		[2]int{1, 6}: 7,
+		[2]int{2, 0}: 8,
+		[2]int{2, 1}: 9,
+		[2]int{2, 2}: 9,
+		//TODO [2]int{2, 3}: 10,
+		//TODO [2]int{2, 4}: ?,
+		//TODO [2]int{2, 5}: ?,
+	}
 )
 
 func init() {
@@ -101,13 +127,18 @@ func init() {
 		initVersionError = fmt.Errorf("Using zmq4 with ZeroMQ major version %d", major)
 		return
 	}
-	if major != int(C.zmq4_major) || minor != int(C.zmq4_minor) || patch != int(C.zmq4_patch) {
-		initVersionError =
-			fmt.Errorf(
-				"zmq4 was installed with ZeroMQ version %d.%d.%d, but the application links with version %d.%d.%d",
-				int(C.zmq4_major), int(C.zmq4_minor), int(C.zmq4_patch),
-				major, minor, patch)
-		return
+
+	v, ok1 := api[[2]int{minor, patch}]
+	w, ok2 := api[[2]int{int(C.zmq4_minor), int(C.zmq4_patch)}]
+	if v != w || !ok1 || !ok2 {
+		if major != int(C.zmq4_major) || minor != int(C.zmq4_minor) || patch != int(C.zmq4_patch) {
+			initVersionError =
+				fmt.Errorf(
+					"zmq4 was installed with ZeroMQ version %d.%d.%d, but the application links with version %d.%d.%d",
+					int(C.zmq4_major), int(C.zmq4_minor), int(C.zmq4_patch),
+					major, minor, patch)
+			return
+		}
 	}
 
 	var err error
